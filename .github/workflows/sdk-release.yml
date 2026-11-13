@@ -1,0 +1,121 @@
+# Builds an SDK repository vp-<api>-sdk-<language>; with publish, releases its tag: to the
+# language's registry when its secrets are there, and as a GitHub release.
+#
+# Secrets (organization or repository; each registry is skipped while its secrets are missing):
+#   rust: CARGO_REGISTRY_TOKEN
+#   ts:   NPM_TOKEN
+#   java: MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD (a Central Portal user token),
+#         MAVEN_GPG_PRIVATE_KEY, MAVEN_GPG_PASSPHRASE
+#   go:   none (the tag is the release; the Go module proxy is asked to fetch it)
+name: sdk-release
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: rust, ts, go or java
+        type: string
+        required: true
+      publish:
+        type: boolean
+        default: false
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        required: false
+      NPM_TOKEN:
+        required: false
+      MAVEN_CENTRAL_USERNAME:
+        required: false
+      MAVEN_CENTRAL_PASSWORD:
+        required: false
+      MAVEN_GPG_PRIVATE_KEY:
+        required: false
+      MAVEN_GPG_PASSPHRASE:
+        required: false
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    env:
+      PUBLISH: ${{ inputs.publish && startsWith(github.ref, 'refs/tags/v') }}
+      TAG: ${{ github.ref_name }}
+      HAS_CARGO: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+      HAS_NPM: ${{ secrets.NPM_TOKEN != '' }}
+      HAS_CENTRAL: ${{ secrets.MAVEN_CENTRAL_USERNAME != '' && secrets.MAVEN_CENTRAL_PASSWORD != '' && secrets.MAVEN_GPG_PRIVATE_KEY != '' && secrets.MAVEN_GPG_PASSPHRASE != '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: The tag is the package's version
+        if: env.PUBLISH == 'true'
+        run: |
+          v="$(yq '.info.version' openapi.yaml)"
+          [[ "v$v" == "$TAG" ]] || { echo "::error::tag $TAG, but openapi.yaml says $v"; exit 1; }
+
+      # ---- Rust
+      - if: inputs.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+      - if: inputs.language == 'rust'
+        run: |
+          cargo build
+          cargo build --no-default-features --features rustls
+          cargo package --allow-dirty
+      - if: inputs.language == 'rust' && env.PUBLISH == 'true' && env.HAS_CARGO == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --allow-dirty
+
+      # ---- TypeScript
+      - if: inputs.language == 'ts'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+      - if: inputs.language == 'ts'
+        run: npm install --no-audit --no-fund && npm run build
+      - if: inputs.language == 'ts' && env.PUBLISH == 'true' && env.HAS_NPM == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public ${{ github.event.repository.private == false && '--provenance' || '' }}
+
+      # ---- Go
+      - if: inputs.language == 'go'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+      - if: inputs.language == 'go'
+        run: go build ./... && go vet ./...
+      - if: inputs.language == 'go' && env.PUBLISH == 'true' && github.event.repository.private == false
+        run: GOPROXY=https://proxy.golang.org GOFLAGS=-mod=mod go list -m "$(go list -m)@$TAG"
+
+      # ---- Java
+      - if: inputs.language == 'java'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE
+      - if: inputs.language == 'java'
+        run: mvn -B -ntp verify
+      - if: inputs.language == 'java' && env.PUBLISH == 'true' && env.HAS_CENTRAL == 'true'
+        env:
+          CENTRAL_USER: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          CENTRAL_PASS: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          # signed artifacts with checksums into a local directory, uploaded to the Central Portal as one bundle
+          staging="$PWD/target/staging"
+          mvn -B -ntp -Psign-artifacts -DskipTests deploy -DaltDeploymentRepository="staging::file://$staging"
+          (cd "$staging" && zip -qr ../bundle.zip . -x '*maven-metadata*')
+          auth="$(printf '%s:%s' "$CENTRAL_USER" "$CENTRAL_PASS" | base64 -w0)"
+          curl -fsS -X POST -H "Authorization: Bearer $auth" -F "bundle=@target/bundle.zip" \
+            "https://central.sonatype.com/api/v1/publisher/upload?publishingType=AUTOMATIC&name=${GITHUB_REPOSITORY#*/}-$TAG"
+
+      # ---- GitHub release
+      - if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"

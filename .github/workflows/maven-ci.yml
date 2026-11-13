@@ -1,0 +1,39 @@
+# Builds and tests a Maven project; optionally uploads a directory of the build as an artifact.
+name: maven-ci
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        type: string
+        default: "25"
+      goals:
+        description: Maven goals and options
+        type: string
+        default: verify
+      artifact-name:
+        description: Name of the artifact to upload (none if empty)
+        type: string
+        default: ""
+      artifact-path:
+        description: What to upload
+        type: string
+        default: ""
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+      - run: mvn -B -ntp ${{ inputs.goals }}
+      - if: inputs.artifact-name != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          if-no-files-found: error

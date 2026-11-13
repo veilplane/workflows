@@ -1,0 +1,80 @@
+# Generates the SDKs of every API from the OpenAPI documents of a build and pushes them into
+# their repositories vp-<api>-sdk-<language> (see sdk/sync.sh).
+name: sdk-sync
+on:
+  workflow_call:
+    inputs:
+      openapi-artifact:
+        description: Artifact with the OpenAPI documents (<api>.json and <api>.yaml)
+        type: string
+        default: openapi
+      openapi-path:
+        description: Where the generating command expects the documents
+        type: string
+        default: app/target/openapi
+      generate:
+        description: Command that generates the SDKs of one API (gets -Dsdk.api, -Dsdk.version, -Dsdk.goMajorSuffix)
+        type: string
+        default: mvn -B -ntp -q -pl sdk generate-sources
+      generated:
+        description: Where it writes them
+        type: string
+        default: sdk/target/sdk
+      apis:
+        description: Space-separated APIs (default every document)
+        type: string
+        default: ""
+      languages:
+        type: string
+        default: rust ts go java
+      java-version:
+        type: string
+        default: "25"
+      workflows-ref:
+        description: Ref of veilplane/workflows to take sync.sh and the templates from
+        type: string
+        default: main
+    secrets:
+      push-token:
+        description: Token with contents and workflows write access to the SDK repositories
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: sdk-sync
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: veilplane/workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .veilplane-workflows
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: Install oasdiff
+        run: go install github.com/oasdiff/oasdiff@v1.36.0 && echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openapi-artifact }}
+          path: ${{ inputs.openapi-path }}
+      - name: Sync
+        env:
+          SPECS: ${{ inputs.openapi-path }}
+          GENERATED: ${{ inputs.generated }}
+          GENERATE: ${{ inputs.generate }}
+          APIS: ${{ inputs.apis }}
+          LANGUAGES: ${{ inputs.languages }}
+          OWNER: ${{ github.repository_owner }}
+          TOKEN: ${{ secrets.push-token }}
+        run: .veilplane-workflows/sdk/sync.sh
