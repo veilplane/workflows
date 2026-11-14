@@ -69,6 +69,12 @@ on:
         description: Branch or tag of veilplane/workflows to take sync.sh and the templates from. Change it only to try out a change of this repository.
         type: string
         default: main
+      allow-breaking:
+        description: >-
+          Push breaking changes within a major version anyway (they are only reported). For a
+          deliberate, one-time break of an API nobody uses yet; never routinely.
+        type: boolean
+        default: false
       app-client-id:
         description: >-
           Client ID of the GitHub App that writes to the SDK repositories. Callers pass the Actions
@@ -201,5 +207,6 @@ jobs:
           LANGUAGES: ${{ inputs.languages }}
           OWNER: ${{ github.repository_owner }}
           TOKEN: ${{ steps.token.outputs.token }}
+          ALLOW_BREAKING: ${{ inputs.allow-breaking && '1' || '' }}
           ADMIN_TOKEN: ${{ steps.admin-token.outputs.token }}
         run: .veilplane-workflows/sdk/sync.sh

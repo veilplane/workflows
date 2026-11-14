@@ -51,6 +51,8 @@
 #   REMOTE         printf pattern of a repository's URL, %s is the repository's name
 #                  (default: GitHub with $TOKEN; tests use local bare repositories)
 #   AUTHOR_NAME, AUTHOR_EMAIL   the author of the commits in the SDK repositories
+#   ALLOW_BREAKING=1  push breaking changes within a major version anyway (only warn). For a
+#                  deliberate, one-time break, such as an API nobody uses yet; never routinely.
 #   DRY_RUN=1      do everything except pushing
 #
 # Exit status: 0 if every repository is in sync; 1 if any API or repository was refused (the
@@ -223,7 +225,11 @@ for API in $APIS; do
     # ---- 3b. Refuse breaking changes within the major version ----------------------------------
 
     if [[ -f openapi.yaml ]] && command -v oasdiff >/dev/null; then
-      if ! oasdiff breaking openapi.yaml "$SPECS/$API.yaml" --fail-on ERR; then
+      if oasdiff breaking openapi.yaml "$SPECS/$API.yaml" --fail-on ERR; then
+        : # nothing breaks
+      elif [[ "${ALLOW_BREAKING:-}" == 1 ]]; then
+        echo "::warning::$repo: breaking changes within major version $MAJOR (listed above), pushed anyway because ALLOW_BREAKING is set"
+      else
         echo "::error::$repo: the $API API changed in a breaking way (listed above) within major version $MAJOR. Undo the change, or add a new major version of the API (/$API/v$((MAJOR + 1)), version $((MAJOR + 1)).0.0) next to this one."
         failed=1
         cd - >/dev/null
