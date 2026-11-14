@@ -145,6 +145,18 @@ configure_repository() {
   fi
 }
 
+# git push, tried up to three times: GitHub occasionally refuses a push for reasons of its own
+# ("unable to write file", "missing necessary objects") that are gone a few seconds later.
+push() {
+  local attempt
+  for attempt in 1 2 3; do
+    git push -q origin "$@" && return 0
+    echo "push of $* failed (attempt $attempt of 3)"
+    sleep $((attempt * 5))
+  done
+  return 1
+}
+
 # Whether the GitHub release of a tag exists, i.e. the tag's release workflow ran to its end. Only
 # with a token for GitHub's API; without one (local tests) every tag counts as released.
 has_release() {
@@ -283,13 +295,13 @@ for API in $APIS; do
     if [[ "${DRY_RUN:-}" == 1 ]]; then
       echo "dry run: would push $branch${tag_push:+ and $tag}"
     else
-      git push -q origin "refs/heads/$branch"
+      push "refs/heads/$branch"
       case "$tag_push" in
-        new) git push -q origin "refs/tags/$tag" ;;
+        new) push "refs/tags/$tag" ;;
         again)
           # deleting and pushing again makes a new push event even if the tag did not move
-          git push -q origin ":refs/tags/$tag"
-          git push -q origin "refs/tags/$tag"
+          push ":refs/tags/$tag"
+          push "refs/tags/$tag"
           ;;
       esac
     fi
