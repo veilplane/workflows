@@ -1,9 +1,22 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "description": [
-    "Renovate for this repository: Veilplane's shared settings (renovate/base.json). The actions used in the workflows, oasdiff's included, are found by Renovate itself."
+    "Renovate for this repository: Veilplane's shared settings (renovate/base.json), plus the oasdiff image the SDK sync runs by name, which Renovate cannot recognise by itself."
   ],
   "extends": [
     "local>veilplane/workflows//renovate/base"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "oasdiff's official image, run with docker in sdk-sync.yml (image=tufin/oasdiff:vX.Y.Z).",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/.+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "image=(?<depName>tufin/oasdiff):(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"
+      ],
+      "datasourceTemplate": "docker"
+    }
   ]
 }
