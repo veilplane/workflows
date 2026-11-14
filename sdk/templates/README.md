@@ -22,10 +22,6 @@ Every call (except the few that are public) needs an API token, sent as `Authori
 - Every major version lives on its own branch: `v1`, `v2`, … Releases are tags (`v{{VERSION}}`) on that branch.
 - Within a major version, changes never break existing callers: the build that produces this SDK refuses breaking changes to the OpenAPI document unless the major version changes.
 
-## How this repository is made
-
-Nothing here is edited by hand. Veilplane's server generates the OpenAPI document from its code, and from it the SDKs in every language, with [OpenAPI Generator](https://openapi-generator.tech). Each change of the API is pushed here automatically; a new version is tagged and released (see `.github/workflows/sdk.yml`). Issues and questions are welcome; pull requests can't be merged, since the next generation would overwrite them, but they are a good way to show what you mean.
-
 ## License
 
 Apache License 2.0, see [LICENSE](LICENSE). Copyright {{YEAR}} Julian Siebert.
