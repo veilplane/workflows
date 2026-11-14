@@ -8,6 +8,8 @@
 # - Every push to a version branch (v1, v2, ...) and every pull request: build the SDK.
 # - A pushed tag v<version> (the sync tags every new version of the API): build, then publish to
 #   the registry of this language, and create the GitHub release.
+# - By hand: Actions -> sdk -> Run workflow, with a tag chosen as the ref: release that version
+#   (again). Versions a registry already has are skipped.
 #
 # All steps live in the reusable workflow sdk-release.yml of veilplane/workflows, shared by all
 # SDK repositories; its header explains them. "secrets: inherit" passes this repository's
@@ -19,6 +21,13 @@ on:
     branches: ["v*"]
     tags: ["v*"]
   pull_request:
+  # "Run workflow" with a tag (v1.2.3) chosen as the ref releases that version by hand
+  workflow_dispatch:
+
+# One run per ref at a time: the same version is never published by two runs at once.
+concurrency:
+  group: sdk-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write # create the GitHub release

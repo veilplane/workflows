@@ -25,11 +25,12 @@
 #         (Apache 2.0), README.md, renovate.json and .github/workflows/sdk.yml;
 #      d. commit, if anything changed;
 #      e. tag v<version>, if that version has no tag yet. Pushing the tag starts the repository's
-#         own workflow (sdk.yml), which releases the SDK. An already released version is never
+#         own workflow (sdk.yml), which releases the SDK. A tag whose release never finished (no
+#         GitHub release exists for it) is pushed again, which starts its release again. An already released version is never
 #         tagged again (registries such as Maven Central never accept the same version twice): if
 #         the code changed without a new version, the change is pushed but not released, and a
 #         warning says so;
-#      f. push the branch (and the tag);
+#      f. push the branch, then the tag on its own;
 #      g. set the repository's settings, if $ADMIN_TOKEN is given: About (description, link to the
 #         package in its registry, topics), no wiki and projects, the newest major version as the
 #         default branch, and remove a leftover branch "main" (see configure_repository).
@@ -144,6 +145,16 @@ configure_repository() {
   fi
 }
 
+# Whether the GitHub release of a tag exists, i.e. the tag's release workflow ran to its end. Only
+# with a token for GitHub's API; without one (local tests) every tag counts as released.
+has_release() {
+  [[ -n "${TOKEN:-}" ]] || return 0
+  local status
+  status="$(curl -sS -o /dev/null -w '%{http_code}' "$GITHUB_API/repos/$OWNER/$1/releases/tags/$2" \
+    -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28")"
+  [[ "$status" != 404 ]]
+}
+
 failed=0
 for API in $APIS; do
 
@@ -243,26 +254,44 @@ for API in $APIS; do
 
     # ---- 3e. Tag a new version -------------------------------------------------------------------
 
-    push=("refs/heads/$branch")
+    tag_push="" # "new": push the new tag; "again": push the tag once more, to start the release again
     if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
       released="$(git ls-remote --tags origin "refs/tags/$tag^{}" | cut -f1)"
-      # changes to README.md or the workflow alone need no release; anything else does
       if [[ "$(git rev-parse HEAD)" != "$released" ]] &&
         ! git diff --quiet "$released" HEAD -- . ':!README.md' ':!renovate.json' ':!.github' 2>/dev/null; then
-        echo "::warning::$repo: the SDK changed, but version $VERSION is already released, so the change is not. Raise the version of the $API API in the server's code (patch for fixes, minor for additions) to release it."
+        # changes to README.md, renovate.json or the workflow alone need no release; anything else does
+        echo "::warning::$repo: the SDK changed, but version $VERSION is already tagged, so the change is not released. Raise the version of the $API API in the server's code (patch for fixes, minor for additions) to release it."
+      elif ! has_release "$repo" "$tag"; then
+        # Tagged, but its release never finished: its workflow did not start, or failed (a missing or
+        # wrong registry token, say). The code is the same, so the tag moves to the current commit
+        # and is pushed again, which starts the release again. Publishing skips what a registry
+        # already has, so a repeated release does no harm.
+        git tag -fa "$tag" -m "$API API $VERSION"
+        tag_push=again
+        echo "$tag has no release yet: tagging again to start its release"
       fi
     else
       git tag -a "$tag" -m "$API API $VERSION"
-      push+=("refs/tags/$tag")
+      tag_push=new
       echo "tagged $tag (its push starts the release in $repo)"
     fi
 
     # ---- 3f. Push --------------------------------------------------------------------------------
 
+    # The branch first, then the tag on its own: GitHub does not reliably start the workflows of a
+    # tag that arrives in the same push as its branch.
     if [[ "${DRY_RUN:-}" == 1 ]]; then
-      echo "dry run: would push ${push[*]}"
+      echo "dry run: would push $branch${tag_push:+ and $tag}"
     else
-      git push -q origin "${push[@]}"
+      git push -q origin "refs/heads/$branch"
+      case "$tag_push" in
+        new) git push -q origin "refs/tags/$tag" ;;
+        again)
+          # deleting and pushing again makes a new push event even if the tag did not move
+          git push -q origin ":refs/tags/$tag"
+          git push -q origin "refs/tags/$tag"
+          ;;
+      esac
     fi
 
     # ---- 3g. Repository settings ------------------------------------------------------------------

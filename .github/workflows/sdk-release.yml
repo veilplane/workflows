@@ -7,7 +7,8 @@
 #
 # On every push and pull request: build the SDK, to show that the generated code compiles.
 #
-# On a tag v<version> (pushed by the sync for every new version of an API), additionally:
+# On a tag v<version> (pushed by the sync for every new version of an API, or chosen by hand
+# under Actions -> sdk -> Run workflow), additionally:
 #   1. check that the tag matches the version in openapi.yaml, so a package is never published
 #      under the wrong version;
 #   2. publish the package to the language's registry, if the registry's secrets are set:
@@ -20,7 +21,11 @@
 #              repositories, the Go module proxy is asked to fetch the new version at once.
 #      A registry whose secrets are missing is skipped (the summary of the run says so), so
 #      releases work before every registry is set up;
-#   3. create the GitHub release for the tag, with notes generated from the commits.
+#   3. create the GitHub release for the tag, with notes generated from the commits. Its existence
+#      tells the sync that this version is released; a tag without a release is pushed again by
+#      the next sync.
+#
+# Running again for the same version is safe: a version a registry already has is skipped.
 #
 # The secrets come from the SDK repository (repository secrets) or, for public repositories,
 # from the organization; sdk.yml passes them on with "secrets: inherit".
@@ -103,9 +108,17 @@ jobs:
         if: inputs.language == 'rust' && env.PUBLISH == 'true' && env.HAS_CARGO == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        # A release can run again for the same version (a re-run, or the sync starting a release
+        # that did not finish); a version crates.io already has is left alone.
         run: |
-          cargo publish --allow-dirty
-          echo "- crates.io: published" >> "$GITHUB_STEP_SUMMARY"
+          name="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].name')"
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if curl -fsS -o /dev/null -A "veilplane-sdk-release (https://github.com/$GITHUB_REPOSITORY)" "https://crates.io/api/v1/crates/$name/$version"; then
+            echo "- crates.io: $name $version was published before" >> "$GITHUB_STEP_SUMMARY"
+          else
+            cargo publish --allow-dirty
+            echo "- crates.io: published $name $version" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # ---- TypeScript ------------------------------------------------------------------------
 
@@ -125,9 +138,15 @@ jobs:
         if: inputs.language == 'ts' && env.PUBLISH == 'true' && env.HAS_NPM == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # a version npm already has is left alone (see the Rust step)
         run: |
-          npm publish --access public ${{ github.event.repository.private == false && '--provenance' || '' }}
-          echo "- npm: published" >> "$GITHUB_STEP_SUMMARY"
+          pkg="$(node -p "require('./package.json').name + '@' + require('./package.json').version")"
+          if npm view "$pkg" version >/dev/null 2>&1; then
+            echo "- npm: $pkg was published before" >> "$GITHUB_STEP_SUMMARY"
+          else
+            npm publish --access public ${{ github.event.repository.private == false && '--provenance' || '' }}
+            echo "- npm: published $pkg" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # ---- Go --------------------------------------------------------------------------------
 
@@ -178,6 +197,12 @@ jobs:
           CENTRAL_PASS: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
         run: |
+          # a version Maven Central already has is left alone (see the Rust step)
+          artifact="${GITHUB_REPOSITORY#*/}"; artifact="${artifact%-java}"; version="${TAG#v}"
+          if curl -fsSI -o /dev/null "https://repo1.maven.org/maven2/com/veilplane/$artifact/$version/$artifact-$version.pom"; then
+            echo "- Maven Central: com.veilplane:$artifact:$version was published before" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           staging="$PWD/target/staging"
           mvn -B -ntp -Psign-artifacts -DskipTests deploy -DaltDeploymentRepository="staging::file://$staging"
           (cd "$staging" && zip -qr ../bundle.zip . -x '*maven-metadata*')
