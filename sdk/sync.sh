@@ -17,10 +17,7 @@
 #      `sdk`, i.e. OpenAPI Generator) with the API's name and version.
 #   3. For every language, in the repository vp-<api>-sdk-<language>:
 #      a. clone it and check out the branch v<major>, or start that branch if it doesn't exist yet;
-#      b. compare the OpenAPI document already there with the new one (oasdiff). A breaking change
-#         (a removed operation, a new required field, ...) is refused: within a major version, an
-#         SDK update must never break the code of its users. Breaking changes need a new major
-#         version, which starts a new branch;
+#      b. (breaking changes were refused before, by the workflow's job "breaking" with oasdiff);
 #      c. replace everything with the generated SDK, plus the files from templates/: LICENSE
 #         (Apache 2.0), README.md, renovate.json and .github/workflows/sdk.yml;
 #      d. commit, if anything changed;
@@ -51,8 +48,6 @@
 #   REMOTE         printf pattern of a repository's URL, %s is the repository's name
 #                  (default: GitHub with $TOKEN; tests use local bare repositories)
 #   AUTHOR_NAME, AUTHOR_EMAIL   the author of the commits in the SDK repositories
-#   ALLOW_BREAKING=1  push breaking changes within a major version anyway (only warn). For a
-#                  deliberate, one-time break, such as an API nobody uses yet; never routinely.
 #   DRY_RUN=1      do everything except pushing
 #
 # Exit status: 0 if every repository is in sync; 1 if any API or repository was refused (the
@@ -220,24 +215,6 @@ for API in $APIS; do
       echo "new branch $branch (first SDK of major version $MAJOR)"
       git checkout -q --orphan "$branch" # no history shared with other branches
       git rm -rq --cached . 2>/dev/null || true
-    fi
-
-    # ---- 3b. Refuse breaking changes within the major version ----------------------------------
-
-    if [[ -f openapi.yaml ]] && command -v oasdiff >/dev/null; then
-      if oasdiff breaking openapi.yaml "$SPECS/$API.yaml" --fail-on ERR; then
-        : # nothing breaks
-      elif [[ "${ALLOW_BREAKING:-}" == 1 ]]; then
-        echo "::warning::$repo: breaking changes within major version $MAJOR (listed above), pushed anyway because ALLOW_BREAKING is set"
-      else
-        echo "::error::$repo: the $API API changed in a breaking way (listed above) within major version $MAJOR. Undo the change, or add a new major version of the API (/$API/v$((MAJOR + 1)), version $((MAJOR + 1)).0.0) next to this one."
-        failed=1
-        cd - >/dev/null
-        echo "::endgroup::"
-        continue
-      fi
-    elif [[ -f openapi.yaml ]]; then
-      echo "::warning::oasdiff is not installed: breaking changes are not checked"
     fi
 
     # ---- 3c. Replace the content -----------------------------------------------------------------

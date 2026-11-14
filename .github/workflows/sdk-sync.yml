@@ -7,9 +7,13 @@
 # each into its own repository, vp-<api>-sdk-<language>. The repositories then release
 # themselves (sdk-release.yml).
 #
-# The work itself is done by sdk/sync.sh in this repository; its header explains every step in
-# detail. In short, for every API and language: branch v<major>, refuse breaking changes, replace
-# the content, commit, tag new versions, push.
+# Three jobs:
+#   1. plan: the APIs of this run and their major versions;
+#   2. breaking: for every API, oasdiff compares the new document with the published one and stops
+#      the run on a breaking change;
+#   3. sync: sdk/sync.sh in this repository generates and pushes; its header explains every step.
+#      In short, for every API and language: branch v<major>, replace the content, commit, tag new
+#      versions, push.
 #
 # Who may write to the SDK repositories: a GitHub App, not a person's token and not GITHUB_TOKEN
 # (GITHUB_TOKEN can only write to the calling repository, and tags pushed with it would not start
@@ -99,9 +103,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  sync:
-    name: Generate and push the SDKs
+  # ---- 1. What this run is about: the APIs, and the major version of each ---------------------
+  plan:
+    name: Plan
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.apis.outputs.matrix }}
     steps:
       # Fail early, with instructions, rather than after minutes of preparation.
       - name: Check that the GitHub App is configured
@@ -112,6 +119,111 @@ jobs:
           [[ -n "$CLIENT_ID" ]] || { echo "::error::no app: set the Actions variable SDK_APP_CLIENT_ID (Variables tab, not Secrets; in the calling repository or the organization). See docs/sdks.md of veilplane-server, \"The GitHub App\"."; exit 1; }
           [[ -n "$KEY" ]] || { echo "::error::no app key: set the Actions secret SDK_APP_PRIVATE_KEY (in the calling repository or the organization). See docs/sdks.md of veilplane-server, \"The GitHub App\"."; exit 1; }
 
+      - name: Download the OpenAPI documents (artifact "${{ inputs.openapi-artifact }}")
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openapi-artifact }}
+          path: specs
+
+      # [{"api": "fleet", "major": "1"}, ...] for the matrix of the next job
+      - name: List the APIs and their major versions
+        id: apis
+        env:
+          APIS: ${{ inputs.apis }}
+        run: |
+          if [[ -z "$APIS" ]]; then for f in specs/*.json; do APIS+="$(basename "$f" .json) "; done; fi
+          matrix="$(for api in $APIS; do jq -c --arg api "$api" '{api: $api, major: (.info.version | split(".")[0])}' "specs/$api.json"; done | jq -cs .)"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "APIs: $matrix"
+
+  # ---- 2. No breaking changes within a major version ------------------------------------------
+  #
+  # For every API, the new OpenAPI document is compared with the one its SDKs were last generated
+  # from (openapi.yaml on the branch v<major> of its first SDK repository), with oasdiff. A
+  # removed operation, a new required field, a narrower type... would break the code of everyone
+  # using the SDKs, so it stops the run before anything is pushed. A breaking change needs a new
+  # major version (/<api>/v2, 2.0.0), which starts new branches; or, once and on purpose, a manual
+  # run with allow-breaking.
+  breaking:
+    name: Breaking changes (${{ matrix.api }})
+    needs: plan
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Download the OpenAPI documents (artifact "${{ inputs.openapi-artifact }}")
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openapi-artifact }}
+          path: specs
+
+      - name: Which repository holds the published document
+        id: repo
+        env:
+          API: ${{ matrix.api }}
+          LANGUAGES: ${{ inputs.languages }}
+        run: echo "name=vp-$API-sdk-${LANGUAGES%% *}" >> "$GITHUB_OUTPUT"
+
+      - name: Get a token from the GitHub App (one hour, that repository, read only)
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repo.outputs.name }}
+          permission-contents: read
+
+      - name: Fetch the published document (${{ steps.repo.outputs.name }}, branch v${{ matrix.major }})
+        id: base
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          REPO: ${{ github.repository_owner }}/${{ steps.repo.outputs.name }}
+          BRANCH: v${{ matrix.major }}
+        run: |
+          if gh api -H "Accept: application/vnd.github.raw" "repos/$REPO/contents/openapi.yaml?ref=$BRANCH" > published.yaml 2>/dev/null; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$REPO has no openapi.yaml on $BRANCH yet: the first SDKs of this major version, nothing to compare"
+          fi
+
+      # review: false keeps the documents in CI (the action can upload them to oasdiff.com for a
+      # side-by-side view); github-token: '' keeps it from commenting.
+      - name: Compare with oasdiff (a breaking change stops the run)
+        if: steps.base.outputs.found == 'true' && !inputs.allow-breaking
+        uses: oasdiff/oasdiff-action/breaking@v0.1.21
+        with:
+          base: published.yaml
+          revision: specs/${{ matrix.api }}.yaml
+          fail-on: ERR
+          review: "false"
+          github-token: ""
+
+      - name: Compare with oasdiff (allow-breaking, so only reported)
+        if: steps.base.outputs.found == 'true' && inputs.allow-breaking
+        uses: oasdiff/oasdiff-action/breaking@v0.1.21
+        with:
+          base: published.yaml
+          revision: specs/${{ matrix.api }}.yaml
+          review: "false"
+          github-token: ""
+
+      - name: Note a deliberate break
+        if: steps.base.outputs.found == 'true' && inputs.allow-breaking
+        env:
+          API: ${{ matrix.api }}
+        run: |
+          echo "::warning::allow-breaking is set: breaking changes of the $API API (listed above) are pushed anyway"
+
+  # ---- 3. Generate and push -------------------------------------------------------------------
+  sync:
+    name: Generate and push the SDKs
+    needs: [plan, breaking]
+    runs-on: ubuntu-latest
+    steps:
       - name: Check out the calling repository (it contains the generating command)
         uses: actions/checkout@v7
 
@@ -128,18 +240,6 @@ jobs:
           distribution: temurin
           java-version: ${{ inputs.java-version }}
           cache: maven
-
-      - name: Install Go (to build oasdiff)
-        uses: actions/setup-go@v7
-        with:
-          go-version: stable
-          cache: false
-
-      # oasdiff compares two OpenAPI documents and lists breaking changes. sync.sh uses it to refuse
-      # SDK updates that would break their users within a major version. The version is pinned;
-      # Renovate updates it (renovate.json of this repository).
-      - name: Install oasdiff (detects breaking API changes)
-        run: go install github.com/oasdiff/oasdiff@v1.36.0 && echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Download the OpenAPI documents (artifact "${{ inputs.openapi-artifact }}")
         uses: actions/download-artifact@v8
@@ -207,6 +307,5 @@ jobs:
           LANGUAGES: ${{ inputs.languages }}
           OWNER: ${{ github.repository_owner }}
           TOKEN: ${{ steps.token.outputs.token }}
-          ALLOW_BREAKING: ${{ inputs.allow-breaking && '1' || '' }}
           ADMIN_TOKEN: ${{ steps.admin-token.outputs.token }}
         run: .veilplane-workflows/sdk/sync.sh
