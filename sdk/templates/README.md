@@ -1,6 +1,6 @@
 # {{NAME}}
 
-The {{LANGUAGE}} SDK for the **Veilplane {{API}} API** (`https://api.veilplane.com/{{API}}/v{{MAJOR}}`), version {{VERSION}}.
+The {{LANGUAGE}} SDK for the **veilplane {{API}} API** (`https://api.veilplane.com/{{API}}/v{{MAJOR}}`), version {{VERSION}}.
 
 {{DESCRIPTION}}
 
