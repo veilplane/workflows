@@ -1,0 +1,57 @@
+# =================================================================================================
+# rust-ci: check a Rust workspace
+# =================================================================================================
+#
+# What it does, in this order (the first failure stops the job):
+#   1. cargo fmt --check: the code is formatted as rustfmt (and the repository's rustfmt.toml) wants;
+#   2. cargo clippy -D warnings: no lint warnings, in all crates and all targets (tests, examples);
+#   3. cargo test: all tests of the workspace.
+#
+# The toolchain is the current stable Rust. Build outputs are cached between runs (rust-cache),
+# keyed by Cargo.lock, so unchanged dependencies are not compiled again.
+#
+# Example:
+#
+#   jobs:
+#     check:
+#       uses: veilplane/workflows/.github/workflows/rust-ci.yml@main
+#       with:
+#         features: --all-features
+name: rust-ci
+
+on:
+  workflow_call:
+    inputs:
+      features:
+        description: 'Cargo feature options for clippy and the tests, e.g. "--all-features" or "--features x,y". Empty means the default features.'
+        type: string
+        default: ""
+
+# Reading the repository is all this workflow needs.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Format, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust with rustfmt and clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Restore the build cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Formatting (cargo fmt --check)
+        run: cargo fmt --all --check
+
+      - name: Lints (cargo clippy, warnings are errors)
+        run: cargo clippy --workspace --all-targets ${{ inputs.features }} -- -D warnings
+
+      - name: Tests (cargo test)
+        run: cargo test --workspace ${{ inputs.features }}

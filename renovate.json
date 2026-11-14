@@ -1,0 +1,17 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Renovate for this repository: the shared settings (renovate/base.json), plus the tools the workflows install",
+    "by version number, which Renovate cannot recognise by itself."
+  ],
+  "extends": ["local>veilplane/workflows//renovate/base"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "oasdiff, installed with `go install github.com/oasdiff/oasdiff@vX.Y.Z` in sdk-sync.yml.",
+      "managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      "matchStrings": ["go install (?<depName>github\\.com/oasdiff/oasdiff)@(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+)"],
+      "datasourceTemplate": "go"
+    }
+  ]
+}

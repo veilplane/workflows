@@ -1,0 +1,9 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Written by veilplane-server's SDK sync (veilplane/workflows, sdk/templates/renovate.json); do not edit here.",
+    "Renovate is switched off in the SDK repositories: everything here is generated and overwritten by the next sync.",
+    "Why, and where the dependencies are updated instead: veilplane/workflows, renovate/sdk.json."
+  ],
+  "extends": ["local>veilplane/workflows//renovate/sdk"]
+}

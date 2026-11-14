@@ -1,0 +1,205 @@
+# =================================================================================================
+# sdk-sync: generate the SDKs of every API and push them into their repositories
+# =================================================================================================
+#
+# The server is the only source of truth for its APIs: its build writes one OpenAPI document per
+# API. This workflow turns those documents into SDKs in Rust, TypeScript, Go and Java and pushes
+# each into its own repository, vp-<api>-sdk-<language>. The repositories then release
+# themselves (sdk-release.yml).
+#
+# The work itself is done by sdk/sync.sh in this repository; its header explains every step in
+# detail. In short, for every API and language: branch v<major>, refuse breaking changes, replace
+# the content, commit, tag new versions, push.
+#
+# Who may write to the SDK repositories: a GitHub App, not a person's token and not GITHUB_TOKEN
+# (GITHUB_TOKEN can only write to the calling repository, and tags pushed with it would not start
+# the SDK repositories' workflows). The App is installed on the SDK repositories with the
+# permissions "Contents" and "Workflows" (read and write), and optionally "Administration" (read
+# and write) for the repositories' settings. Every run gets tokens from it that are valid for one
+# hour, only for the repositories of this run: one for contents and workflows, a second one for
+# the settings.
+# Setting it up: docs/sdks.md of veilplane-server, "The GitHub App".
+#
+# Example (veilplane-server, .github/workflows/ci.yml), after a build that uploaded the
+# documents as the artifact "openapi":
+#
+#   sdks:
+#     needs: build
+#     uses: veilplane/workflows/.github/workflows/sdk-sync.yml@main
+#     with:
+#       app-client-id: ${{ vars.SDK_APP_CLIENT_ID }}
+#     secrets:
+#       app-private-key: ${{ secrets.SDK_APP_PRIVATE_KEY }}
+name: sdk-sync
+
+on:
+  workflow_call:
+    inputs:
+      openapi-artifact:
+        description: Name of the artifact (from an earlier job of the same run) holding the OpenAPI documents <api>.json and <api>.yaml.
+        type: string
+        default: openapi
+      openapi-path:
+        description: Where to put the documents, relative to the repository; the generating command reads them from there.
+        type: string
+        default: app/target/openapi
+      generate:
+        description: >-
+          The command that generates the SDKs of one API, run in the repository's root. It gets
+          -Dsdk.api=<api> -Dsdk.version=<version> -Dsdk.goMajorSuffix=<"" or /v2...> appended.
+        type: string
+        default: mvn -B -ntp -q -pl sdk generate-sources
+      generated:
+        description: Where that command writes the SDKs, one directory per generator (rust, typescript, go, java).
+        type: string
+        default: sdk/target/sdk
+      apis:
+        description: Which APIs to sync, space-separated, e.g. "fleet auth". Empty means every document in the artifact.
+        type: string
+        default: ""
+      languages:
+        description: Which languages to sync (the suffixes of the repository names).
+        type: string
+        default: rust ts go java
+      java-version:
+        description: The JDK for the generating command.
+        type: string
+        default: "25"
+      workflows-ref:
+        description: Branch or tag of veilplane/workflows to take sync.sh and the templates from. Change it only to try out a change of this repository.
+        type: string
+        default: main
+      app-client-id:
+        description: >-
+          Client ID of the GitHub App that writes to the SDK repositories. Callers pass the Actions
+          variable SDK_APP_CLIENT_ID (repository or organization variable).
+        type: string
+        default: ""
+    secrets:
+      app-private-key:
+        description: The App's private key (the whole .pem file). Callers pass the Actions secret SDK_APP_PRIVATE_KEY.
+        # Not "required": a missing key would make GitHub reject the whole calling workflow with an
+        # unhelpful message. The first step checks it instead and says what to do.
+        required: false
+
+# The calling repository is only read. Writing to the SDK repositories uses the App's token.
+permissions:
+  contents: read
+
+# Two syncs at the same time would push to the same branches and race each other. So: one at a
+# time; a newer run waits for the running one instead of cancelling it.
+concurrency:
+  group: sdk-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Generate and push the SDKs
+    runs-on: ubuntu-latest
+    steps:
+      # Fail early, with instructions, rather than after minutes of preparation.
+      - name: Check that the GitHub App is configured
+        env:
+          CLIENT_ID: ${{ inputs.app-client-id }}
+          KEY: ${{ secrets.app-private-key }}
+        run: |
+          [[ -n "$CLIENT_ID" ]] || { echo "::error::no app: set the Actions variable SDK_APP_CLIENT_ID (Variables tab, not Secrets; in the calling repository or the organization). See docs/sdks.md of veilplane-server, \"The GitHub App\"."; exit 1; }
+          [[ -n "$KEY" ]] || { echo "::error::no app key: set the Actions secret SDK_APP_PRIVATE_KEY (in the calling repository or the organization). See docs/sdks.md of veilplane-server, \"The GitHub App\"."; exit 1; }
+
+      - name: Check out the calling repository (it contains the generating command)
+        uses: actions/checkout@v7
+
+      - name: Check out veilplane/workflows (sync.sh and the templates of the SDK repositories)
+        uses: actions/checkout@v7
+        with:
+          repository: veilplane/workflows
+          ref: ${{ inputs.workflows-ref }}
+          path: .veilplane-workflows
+
+      - name: Install JDK ${{ inputs.java-version }} (for OpenAPI Generator, run by Maven)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+
+      - name: Install Go (to build oasdiff)
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+
+      # oasdiff compares two OpenAPI documents and lists breaking changes. sync.sh uses it to refuse
+      # SDK updates that would break their users within a major version. The version is pinned;
+      # Renovate updates it (renovate.json of this repository).
+      - name: Install oasdiff (detects breaking API changes)
+        run: go install github.com/oasdiff/oasdiff@v1.36.0 && echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Download the OpenAPI documents (artifact "${{ inputs.openapi-artifact }}")
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openapi-artifact }}
+          path: ${{ inputs.openapi-path }}
+
+      # The token of the next step is limited to the repositories this run writes to:
+      # vp-<api>-sdk-<language> for every API and language of this run.
+      - name: List the SDK repositories this run writes to
+        id: repos
+        env:
+          SPECS: ${{ inputs.openapi-path }}
+          APIS: ${{ inputs.apis }}
+          LANGUAGES: ${{ inputs.languages }}
+        run: |
+          if [[ -z "$APIS" ]]; then for f in "$SPECS"/*.json; do APIS+="$(basename "$f" .json) "; done; fi
+          repos=""
+          for api in $APIS; do for lang in $LANGUAGES; do repos+="vp-$api-sdk-$lang,"; done; done
+          echo "list=${repos%,}" >> "$GITHUB_OUTPUT"
+          echo "Repositories: ${repos%,}"
+
+      # Valid for one hour and revoked automatically when the job ends. Fails with "Not Found" if
+      # the App is not installed on one of the repositories: add it in the App's installation
+      # settings (Repository access).
+      - name: Get a token from the GitHub App (one hour, these repositories, contents + workflows)
+        id: token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repos.outputs.list }}
+          permission-contents: write
+          permission-workflows: write
+
+      # A second token, only for the repositories' settings (sync.sh, step 3g: About, link, topics,
+      # default branch). It needs the App's permission "Administration: Read and write". That
+      # permission is optional: without it this step fails, the run goes on, and sync.sh leaves
+      # the settings alone (it only warns).
+      - name: Get a token for the repositories' settings (optional, Administration permission)
+        id: admin-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ inputs.app-client-id }}
+          private-key: ${{ secrets.app-private-key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ steps.repos.outputs.list }}
+          permission-administration: write
+
+      - name: Note if the repositories' settings cannot be updated
+        if: steps.admin-token.outcome != 'success'
+        run: |
+          echo "::warning::The GitHub App has no permission 'Administration: Read and write': About, link, topics and default branch of the SDK repositories are not updated. See docs/sdks.md of veilplane-server, 'The GitHub App'."
+
+      # The log has one collapsible group per API (generation) and per repository, saying what
+      # happened there: "unchanged", "committed ...", "tagged ...", or why it was refused.
+      - name: Generate the SDKs and push them (sync.sh)
+        env:
+          SPECS: ${{ inputs.openapi-path }}
+          GENERATED: ${{ inputs.generated }}
+          GENERATE: ${{ inputs.generate }}
+          APIS: ${{ inputs.apis }}
+          LANGUAGES: ${{ inputs.languages }}
+          OWNER: ${{ github.repository_owner }}
+          TOKEN: ${{ steps.token.outputs.token }}
+          ADMIN_TOKEN: ${{ steps.admin-token.outputs.token }}
+        run: .veilplane-workflows/sdk/sync.sh

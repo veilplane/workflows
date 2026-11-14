@@ -1,0 +1,209 @@
+# =================================================================================================
+# sdk-release: build an SDK repository, and release it when a version tag is pushed
+# =================================================================================================
+#
+# Called by every SDK repository vp-<api>-sdk-<language>, from its .github/workflows/sdk.yml
+# (written by the sync from sdk/templates/sdk.yml).
+#
+# On every push and pull request: build the SDK, to show that the generated code compiles.
+#
+# On a tag v<version> (pushed by the sync for every new version of an API), additionally:
+#   1. check that the tag matches the version in openapi.yaml, so a package is never published
+#      under the wrong version;
+#   2. publish the package to the language's registry, if the registry's secrets are set:
+#        rust  crates.io            crate vp-<api>-sdk                  CARGO_REGISTRY_TOKEN
+#        ts    npm                  @veilplane/<api>-sdk                NPM_TOKEN
+#        java  Maven Central        com.veilplane:vp-<api>-sdk          MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD
+#                                                                       (a Central Portal user token),
+#                                                                       MAVEN_GPG_PRIVATE_KEY, MAVEN_GPG_PASSPHRASE
+#        go    the tag is the release: Go fetches modules straight from GitHub. For public
+#              repositories, the Go module proxy is asked to fetch the new version at once.
+#      A registry whose secrets are missing is skipped (the summary of the run says so), so
+#      releases work before every registry is set up;
+#   3. create the GitHub release for the tag, with notes generated from the commits.
+#
+# The secrets come from the SDK repository (repository secrets) or, for public repositories,
+# from the organization; sdk.yml passes them on with "secrets: inherit".
+name: sdk-release
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: The SDK's language, as in the repository's name - rust, ts, go or java.
+        type: string
+        required: true
+      publish:
+        description: Publish (true only for a pushed tag v*; sdk.yml decides this).
+        type: boolean
+        default: false
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        description: crates.io API token allowed to publish the crate.
+        required: false
+      NPM_TOKEN:
+        description: npm automation token for the @veilplane scope.
+        required: false
+      MAVEN_CENTRAL_USERNAME:
+        description: Central Portal user token, user name part.
+        required: false
+      MAVEN_CENTRAL_PASSWORD:
+        description: Central Portal user token, password part.
+        required: false
+      MAVEN_GPG_PRIVATE_KEY:
+        description: ASCII-armored private key that signs the Java artifacts (Maven Central requires signatures).
+        required: false
+      MAVEN_GPG_PASSPHRASE:
+        description: Its passphrase.
+        required: false
+
+permissions:
+  contents: write # to create the GitHub release
+  id-token: write # npm provenance: proves on npmjs.com that the package was built by this workflow
+
+jobs:
+  sdk:
+    name: Build${{ inputs.publish && ' and release' || '' }} (${{ inputs.language }})
+    runs-on: ubuntu-latest
+    env:
+      # Publish only for a tag, never for a branch, even if a caller passes publish: true.
+      PUBLISH: ${{ inputs.publish && startsWith(github.ref, 'refs/tags/v') }}
+      TAG: ${{ github.ref_name }}
+      # Secrets cannot be tested in "if:" directly; these flags say which registries are set up.
+      HAS_CARGO: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+      HAS_NPM: ${{ secrets.NPM_TOKEN != '' }}
+      HAS_CENTRAL: ${{ secrets.MAVEN_CENTRAL_USERNAME != '' && secrets.MAVEN_CENTRAL_PASSWORD != '' && secrets.MAVEN_GPG_PRIVATE_KEY != '' && secrets.MAVEN_GPG_PASSPHRASE != '' }}
+    steps:
+      - name: Check out the SDK
+        uses: actions/checkout@v7
+
+      - name: Check that tag ${{ github.ref_name }} matches the API's version in openapi.yaml
+        if: env.PUBLISH == 'true'
+        run: |
+          v="$(yq '.info.version' openapi.yaml)"
+          [[ "v$v" == "$TAG" ]] || { echo "::error::the tag is $TAG, but openapi.yaml says version $v: refusing to publish under the wrong version"; exit 1; }
+          echo "Releasing version $v" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Rust ------------------------------------------------------------------------------
+
+      - name: "Rust: install stable Rust"
+        if: inputs.language == 'rust'
+        uses: dtolnay/rust-toolchain@stable
+
+      # Both TLS backends must build: native-tls (the default) and rustls (a feature).
+      # `cargo package` checks what crates.io would receive, without uploading it.
+      - name: "Rust: build (native-tls and rustls), check the crate package"
+        if: inputs.language == 'rust'
+        run: |
+          cargo build
+          cargo build --no-default-features --features rustls
+          cargo package --allow-dirty
+
+      - name: "Rust: publish to crates.io"
+        if: inputs.language == 'rust' && env.PUBLISH == 'true' && env.HAS_CARGO == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish --allow-dirty
+          echo "- crates.io: published" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- TypeScript ------------------------------------------------------------------------
+
+      - name: "TypeScript: install Node.js 22"
+        if: inputs.language == 'ts'
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      - name: "TypeScript: install dependencies, compile"
+        if: inputs.language == 'ts'
+        run: npm install --no-audit --no-fund && npm run build
+
+      # --provenance links the package on npmjs.com to this build; npm allows it only for public repositories.
+      - name: "TypeScript: publish to npm"
+        if: inputs.language == 'ts' && env.PUBLISH == 'true' && env.HAS_NPM == 'true'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm publish --access public ${{ github.event.repository.private == false && '--provenance' || '' }}
+          echo "- npm: published" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Go --------------------------------------------------------------------------------
+
+      - name: "Go: install the Go version of go.mod"
+        if: inputs.language == 'go'
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: "Go: build, vet"
+        if: inputs.language == 'go'
+        run: go build ./... && go vet ./...
+
+      # Without this, the proxy fetches a new version the first time someone asks for it. Private
+      # repositories are not reachable for the proxy, so this runs only for public ones.
+      - name: "Go: announce the version to the Go module proxy"
+        if: inputs.language == 'go' && env.PUBLISH == 'true' && github.event.repository.private == false
+        run: |
+          GOPROXY=https://proxy.golang.org GOFLAGS=-mod=mod go list -m "$(go list -m)@$TAG"
+          echo "- Go module proxy: $(go list -m)@$TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- Java ------------------------------------------------------------------------------
+
+      # Also imports the signing key (when set) and tells Maven its passphrase.
+      - name: "Java: install JDK 21 (and the signing key)"
+        if: inputs.language == 'java'
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          gpg-private-key: ${{ secrets.MAVEN_GPG_PRIVATE_KEY }}
+          gpg-passphrase: MAVEN_GPG_PASSPHRASE # the name of the environment variable that holds it
+
+      - name: "Java: build (mvn verify)"
+        if: inputs.language == 'java'
+        run: mvn -B -ntp verify
+
+      # Maven Central takes a bundle: the jar, sources, javadoc and pom, each signed (.asc) and with
+      # checksums. `mvn deploy` into a local directory produces exactly that layout (the profile
+      # sign-artifacts of the generated pom signs); the zip of it is uploaded to the Central Portal,
+      # which checks it and, with publishingType=AUTOMATIC, releases it to Maven Central.
+      - name: "Java: sign and publish to Maven Central"
+        if: inputs.language == 'java' && env.PUBLISH == 'true' && env.HAS_CENTRAL == 'true'
+        env:
+          CENTRAL_USER: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          CENTRAL_PASS: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          staging="$PWD/target/staging"
+          mvn -B -ntp -Psign-artifacts -DskipTests deploy -DaltDeploymentRepository="staging::file://$staging"
+          (cd "$staging" && zip -qr ../bundle.zip . -x '*maven-metadata*')
+          auth="$(printf '%s:%s' "$CENTRAL_USER" "$CENTRAL_PASS" | base64 -w0)"
+          curl -fsS -X POST -H "Authorization: Bearer $auth" -F "bundle=@target/bundle.zip" \
+            "https://central.sonatype.com/api/v1/publisher/upload?publishingType=AUTOMATIC&name=${GITHUB_REPOSITORY#*/}-$TAG"
+          echo "- Maven Central: uploaded (the Central Portal shows its validation and publication)" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---- All languages ---------------------------------------------------------------------
+
+      - name: Note the registries that were skipped
+        if: env.PUBLISH == 'true'
+        env:
+          LANGUAGE: ${{ inputs.language }}
+        run: |
+          case "$LANGUAGE" in
+            rust) [[ "$HAS_CARGO" == true ]] || echo "- crates.io: skipped, secret CARGO_REGISTRY_TOKEN is not set" ;;
+            ts) [[ "$HAS_NPM" == true ]] || echo "- npm: skipped, secret NPM_TOKEN is not set" ;;
+            java) [[ "$HAS_CENTRAL" == true ]] || echo "- Maven Central: skipped, secrets MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD, MAVEN_GPG_PRIVATE_KEY, MAVEN_GPG_PASSPHRASE are not all set" ;;
+          esac >> "$GITHUB_STEP_SUMMARY"
+
+      # Skipped if the release exists already (a re-run of this workflow).
+      - name: Create the GitHub release ${{ github.ref_name }}
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
+          echo "- GitHub release: $TAG" >> "$GITHUB_STEP_SUMMARY"

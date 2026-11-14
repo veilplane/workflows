@@ -1,0 +1,34 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Veilplane's shared Renovate settings. Every repository that Renovate keeps up to date extends this preset",
+    "(\"extends\": [\"github>veilplane/workflows//renovate/base\"]), so the rules live in one place.",
+    "- config:recommended: Renovate's sensible defaults (dependency dashboard, monorepo groups, known workarounds).",
+    "- minimumReleaseAge: a new version is proposed only once it is 14 days old. Broken or malicious releases are",
+    "  usually found and pulled within days; waiting costs little. Security fixes are not delayed (vulnerabilityAlerts).",
+    "- Major updates always get their own pull request and are never merged automatically.",
+    "- Pull requests are labelled \"dependencies\" and opened Monday mornings (Europe/Berlin), at most 5 at once."
+  ],
+  "extends": ["config:recommended"],
+  "timezone": "Europe/Berlin",
+  "schedule": ["* 0-8 * * 1"],
+  "minimumReleaseAge": "14 days",
+  "internalChecksFilter": "strict",
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 5,
+  "separateMajorMinor": true,
+  "vulnerabilityAlerts": {
+    "description": "Known vulnerabilities: proposed at once, whatever the schedule and the release age.",
+    "minimumReleaseAge": null,
+    "schedule": ["at any time"],
+    "labels": ["dependencies", "security"]
+  },
+  "packageRules": [
+    {
+      "description": "GitHub Actions: one pull request for all non-major updates of the actions used in workflows.",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "digest"],
+      "groupName": "GitHub Actions"
+    }
+  ]
+}

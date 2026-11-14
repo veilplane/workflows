@@ -1,0 +1,76 @@
+# =================================================================================================
+# maven-ci: build and test a Maven project
+# =================================================================================================
+#
+# What it does:
+#   1. checks out the calling repository,
+#   2. installs the requested JDK (Eclipse Temurin), with the local Maven repository cached between
+#      runs, so dependencies are downloaded only when they change,
+#   3. runs Maven (by default `mvn verify`: compile, all tests, packaging),
+#   4. optionally uploads a directory of the build as an artifact, for later jobs of the same run.
+#
+# Used by veilplane-server: its tests write the OpenAPI documents of all APIs to app/target/openapi,
+# which this workflow uploads as the artifact "openapi" for the SDK sync (sdk-sync.yml).
+#
+# Example (in the calling repository's .github/workflows/ci.yml):
+#
+#   jobs:
+#     build:
+#       uses: veilplane/workflows/.github/workflows/maven-ci.yml@main
+#       with:
+#         java-version: "25"
+#         artifact-name: openapi
+#         artifact-path: app/target/openapi
+name: maven-ci
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        description: The JDK to build with (a major version such as "25").
+        type: string
+        default: "25"
+      goals:
+        description: Maven goals and options, as typed after `mvn` (e.g. "verify" or "-Pci verify").
+        type: string
+        default: verify
+      artifact-name:
+        description: Name under which a directory of the build is uploaded. Empty means nothing is uploaded.
+        type: string
+        default: ""
+      artifact-path:
+        description: The directory (or files) to upload, relative to the repository, e.g. "app/target/openapi".
+        type: string
+        default: ""
+
+# Reading the repository is all this workflow needs.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install JDK ${{ inputs.java-version }} (Temurin), with the Maven cache
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+
+      # -B: batch mode (no colours or prompts in the log); -ntp: no download progress lines.
+      - name: mvn ${{ inputs.goals }}
+        run: mvn -B -ntp ${{ inputs.goals }}
+
+      - name: Upload ${{ inputs.artifact-path }} as artifact "${{ inputs.artifact-name }}"
+        if: inputs.artifact-name != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          # a missing directory means the build did not produce what later jobs rely on: fail here
+          if-no-files-found: error
