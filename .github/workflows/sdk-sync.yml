@@ -40,6 +40,13 @@ on:
         description: Name of the artifact (from an earlier job of the same run) holding the OpenAPI documents <api>.json and <api>.yaml.
         type: string
         default: openapi
+      openapi-run-id:
+        description: >-
+          Take the artifact from this earlier run instead (of the same repository): when the caller
+          skipped its build because the very same tree was built and tested before. Empty means
+          this run. Needs the permission actions: read.
+        type: string
+        default: ""
       openapi-path:
         description: Where to put the documents, relative to the repository; the generating command reads them from there.
         type: string
@@ -92,6 +99,7 @@ on:
 # The calling repository is only read. Writing to the SDK repositories uses the App's token.
 permissions:
   contents: read
+  actions: read # the OpenAPI documents of an earlier run (openapi-run-id)
 
 # Two syncs at the same time would push to the same branches and race each other. So: one at a
 # time; a newer run waits for the running one instead of cancelling it.
@@ -131,10 +139,20 @@ jobs:
           cache: maven
 
       - name: Download the OpenAPI documents (artifact "${{ inputs.openapi-artifact }}")
+        if: inputs.openapi-run-id == ''
         uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.openapi-artifact }}
           path: ${{ inputs.openapi-path }}
+
+      - name: Download the OpenAPI documents from run ${{ inputs.openapi-run-id }}, which tested this tree before
+        if: inputs.openapi-run-id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.openapi-artifact }}
+          path: ${{ inputs.openapi-path }}
+          run-id: ${{ inputs.openapi-run-id }}
+          github-token: ${{ github.token }}
 
       # The token of the next step is limited to the repositories this run writes to:
       # vp-<api>-sdk-<language> for every API and language of this run.
