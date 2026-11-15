@@ -36,6 +36,12 @@ name: sdk-sync
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: >-
+          The runner, e.g. "blacksmith-4vcpu-ubuntu-2404" (Blacksmith, for repositories it is
+          enabled for) or the default, GitHub's "ubuntu-latest".
+        type: string
+        default: ubuntu-latest
       openapi-artifact:
         description: Name of the artifact (from an earlier job of the same run) holding the OpenAPI documents <api>.json and <api>.yaml.
         type: string
@@ -110,7 +116,7 @@ concurrency:
 jobs:
   sync:
     name: Generate and push the SDKs
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     steps:
       # Fail early, with instructions, rather than after minutes of preparation.
       - name: Check that the GitHub App is configured

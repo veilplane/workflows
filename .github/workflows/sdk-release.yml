@@ -34,6 +34,12 @@ name: sdk-release
 on:
   workflow_call:
     inputs:
+      runs-on:
+        description: >-
+          The runner, e.g. "blacksmith-4vcpu-ubuntu-2404" (Blacksmith, for repositories it is
+          enabled for) or the default, GitHub's "ubuntu-latest".
+        type: string
+        default: ubuntu-latest
       language:
         description: The SDK's language, as in the repository's name - rust, ts, go or java.
         type: string
@@ -69,7 +75,7 @@ permissions:
 jobs:
   sdk:
     name: Build${{ inputs.publish && ' and release' || '' }} (${{ inputs.language }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     env:
       # Publish only for a tag, never for a branch, even if a caller passes publish: true.
       PUBLISH: ${{ inputs.publish && startsWith(github.ref, 'refs/tags/v') }}
